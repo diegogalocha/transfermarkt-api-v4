@@ -1,6 +1,6 @@
 services:
   transfermarkt-api-v4:
-    image: zcoutverse/transfermarkt-api-v4:latest
+    image: diegogalocha/transfermarkt-api-v4:latest
     container_name: transfermarkt-api-v4
     ports:
       - "8100:8000"
