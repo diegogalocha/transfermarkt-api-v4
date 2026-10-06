@@ -21,9 +21,15 @@ def test_client_ip_prefers_fly_client_ip() -> None:
     assert client_ip(request_with({"Fly-Client-IP": "203.0.113.7"})) == "203.0.113.7"
 
 
-def test_client_ip_ignores_x_forwarded_for() -> None:
-    """A spoofed X-Forwarded-For does not change the key."""
-    assert client_ip(request_with({"X-Forwarded-For": "198.51.100.1"})) == "10.0.0.1"
+def test_client_ip_uses_last_x_forwarded_for_hop() -> None:
+    """On Railway the edge appends the real client address last; client-supplied prefixes are ignored."""
+    assert client_ip(request_with({"X-Forwarded-For": "198.51.100.1"})) == "198.51.100.1"
+    assert client_ip(request_with({"X-Forwarded-For": "1.2.3.4, 203.0.113.9, 198.51.100.1"})) == "198.51.100.1"
+
+
+def test_client_ip_falls_back_to_connection() -> None:
+    """Without proxy headers, the TCP peer address is the key."""
+    assert client_ip(request_with({})) == "10.0.0.1"
 
 
 @pytest.fixture
@@ -67,9 +73,10 @@ def test_clients_have_separate_budgets(limited_client: TestClient) -> None:
 
 
 def test_spoofed_x_forwarded_for_shares_the_limit(limited_client: TestClient) -> None:
-    """Changing X-Forwarded-For on each request does not reset the limit."""
+    """Prepending fake X-Forwarded-For hops does not reset the limit: only the last hop keys the budget."""
     statuses = [
-        limited_client.get(API_PATH, headers={"X-Forwarded-For": f"198.51.100.{i}"}).status_code for i in range(3)
+        limited_client.get(API_PATH, headers={"X-Forwarded-For": f"198.51.100.{i}, 203.0.113.9"}).status_code
+        for i in range(3)
     ]
 
     assert statuses[-1] == 429
@@ -84,18 +91,29 @@ def test_health_and_docs_are_not_limited(limited_client: TestClient, path: str) 
     assert limited_client.get(API_PATH).status_code == 200
 
 
-def test_access_log_shows_client_ip(caplog: pytest.LogCaptureFixture) -> None:
+@pytest.fixture
+def access_log_capture(caplog: pytest.LogCaptureFixture) -> Iterator[pytest.LogCaptureFixture]:
+    """Capture `app.access` records: it logs to stdout with propagate=False, so caplog needs a direct handler."""
+    access_logger = logging.getLogger("app.access")
+    access_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.INFO, logger="app.access"):
+            yield caplog
+    finally:
+        access_logger.removeHandler(caplog.handler)
+
+
+def test_access_log_shows_client_ip(access_log_capture: pytest.LogCaptureFixture) -> None:
     """Each request is logged with the client IP from `Fly-Client-IP`, not the proxy's address."""
-    with TestClient(app) as client, caplog.at_level(logging.INFO, logger="uvicorn.error"):
+    with TestClient(app) as client:
         client.get("/health?probe=1", headers={"Fly-Client-IP": "203.0.113.7"})
 
-    assert '203.0.113.7 - "GET /health?probe=1" 200' in caplog.messages
+    assert '203.0.113.7 - "GET /health?probe=1" 200' in access_log_capture.messages
 
 
-def test_access_log_includes_429(limited_client: TestClient, caplog: pytest.LogCaptureFixture) -> None:
+def test_access_log_includes_429(limited_client: TestClient, access_log_capture: pytest.LogCaptureFixture) -> None:
     """Requests refused with 429 are logged too."""
-    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
-        for _ in range(3):
-            limited_client.get(API_PATH, headers={"Fly-Client-IP": "203.0.113.7"})
+    for _ in range(3):
+        limited_client.get(API_PATH, headers={"Fly-Client-IP": "203.0.113.7"})
 
-    assert f'203.0.113.7 - "GET {API_PATH}" 429' in caplog.messages
+    assert f'203.0.113.7 - "GET {API_PATH}" 429' in access_log_capture.messages
