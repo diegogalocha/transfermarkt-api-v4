@@ -1,4 +1,5 @@
 import logging
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -13,7 +14,15 @@ from app.settings import settings
 from app.tfmkt import TfmktClient
 from app.tfmkt.freshness import track_fetches
 
-access_log = logging.getLogger("uvicorn.error")
+# Access log dedicado a stdout: uvicorn.error escribe a stderr y plataformas como
+# Railway colorean todo stderr como error, con lo que los 200 salían en rojo.
+access_log = logging.getLogger("app.access")
+if not access_log.handlers:
+    _handler = logging.StreamHandler(sys.stdout)
+    _handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    access_log.addHandler(_handler)
+    access_log.setLevel(logging.INFO)
+    access_log.propagate = False
 
 
 def client_ip(request: Request) -> str:
@@ -21,10 +30,19 @@ def client_ip(request: Request) -> str:
     Address of the client calling the API, the key for rate limiting.
 
     On Fly.io, the proxy sets `Fly-Client-IP` to the address that connected to it, replacing any value sent by the
-    client. `X-Forwarded-For` is ignored because clients can prepend arbitrary addresses to it. Without that header,
-    the address of the TCP connection is used. Outside Fly.io, clients can set `Fly-Client-IP` themselves.
+    client. On Railway, the edge appends the real client address as the LAST `X-Forwarded-For` entry — clients can
+    prepend fake ones, so the last is the trustworthy hop. Without those headers, the TCP connection address is used
+    (on Railway that is the internal proxy, 100.64.x.x).
     """
-    return request.headers.get("Fly-Client-IP") or (request.client.host if request.client else "unknown")
+    fly_ip = request.headers.get("Fly-Client-IP")
+    if fly_ip:
+        return fly_ip
+    xff = request.headers.get("X-Forwarded-For")
+    if xff:
+        last_hop = xff.split(",")[-1].strip()
+        if last_hop:
+            return last_hop
+    return request.client.host if request.client else "unknown"
 
 
 limiter = RateLimiter(settings.RATE_LIMITING_FREQUENCY, enabled=settings.RATE_LIMITING_ENABLE)
