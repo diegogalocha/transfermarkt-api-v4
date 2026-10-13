@@ -10,10 +10,10 @@ WORKDIR /app
 
 COPY --from=ghcr.io/astral-sh/uv:0.12.23 /uv /bin/uv
 
-COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
-
 COPY app ./app
+COPY transfermarkt_api ./transfermarkt_api
+COPY README.md LICENSE pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --extra server --no-editable
 
 RUN useradd --create-home appuser
 USER appuser
